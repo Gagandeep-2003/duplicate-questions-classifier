@@ -1,0 +1,12 @@
+body {
+    font-family: Arial, sans-serif;
+    max-width: 800px;
+    margin: 20px auto;
+    padding: 0 10px;
+}
+textarea {
+    width: 100%;
+}
+h2 {
+    color: #00796B;
+}

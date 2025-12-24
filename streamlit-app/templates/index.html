@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Quora Duplicate Question Checker</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <h1>Duplicate Question Pairs Detector</h1>
+    <form method="POST">
+        <label>Question 1:</label><br>
+        <textarea name="q1" rows="3" cols="60">{{ q1 }}</textarea><br><br>
+
+        <label>Question 2:</label><br>
+        <textarea name="q2" rows="3" cols="60">{{ q2 }}</textarea><br><br>
+
+        <button type="submit">Check</button>
+    </form>
+
+    {% if result %}
+    <h2>Result: {{ result }}</h2>
+    <p>Confidence: {{ "%.2f"|format(confidence * 100) }}%</p>
+
+    <h3>Feature Analysis</h3>
+    <ul>
+        <li>Common Words: {{ features.get('common_words') }}</li>
+        <li>Word Share: {{ "%.2f"|format(features.get('word_share',0)*100) }}%</li>
+        <li>Fuzzy Ratio: {{ "%.2f"|format(features.get('fuzzy_ratio',0)) }}%</li>
+        <li>Token Set Ratio: {{ "%.2f"|format(features.get('token_set_ratio',0)) }}%</li>
+    </ul>
+    {% endif %}
+</body>
+</html>

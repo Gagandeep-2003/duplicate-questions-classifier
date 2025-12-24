@@ -1,0 +1,32 @@
+# .gitignore for Machine Learning Projects
+
+# Large Data Files
+*.csv
+*.tsv
+*.json
+!sample_submission.csv
+!feedback_log.csv
+
+# Models (too large for standard GitHub, use LFS or external storage if needed)
+*.pkl
+*.h5
+*.pt
+*.pth
+*.onnx
+
+# Python Virtual Environments
+venv/
+env/
+.env
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# IDE Settings
+.vscode/
+.idea/
+.DS_Store
+
+# Streamlit
+.streamlit/secrets.toml
