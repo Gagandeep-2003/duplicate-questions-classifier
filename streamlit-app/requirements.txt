@@ -6,3 +6,6 @@ distance
 beautifulsoup4
 numpy
 pandas
+langdetect
+sentence-transformers
+deep-translator
