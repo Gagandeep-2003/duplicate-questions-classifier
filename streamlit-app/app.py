@@ -226,10 +226,23 @@ import time
 import json
 import pickle
 import logging
+from typing import List, Tuple
+
 import numpy as np
 import pandas as pd
 import streamlit as st
+try:
+    from sentence_transformers import SentenceTransformer, util as st_util
+except Exception:  # pragma: no cover - optional dependency for multilingual embeddings
+    SentenceTransformer = None  # type: ignore
+    st_util = None  # type: ignore
 from urllib.parse import quote
+
+from language_utils import (
+    detect_language_confidence,
+    primary_language,
+    translate_to_english,
+)
 
 # Import search functionality
 try:
@@ -447,6 +460,38 @@ def load_model():
 model = load_model()
 
 # -----------------------------------------------------------------------------
+# Multilingual encoder loader (sentence-transformers)
+# -----------------------------------------------------------------------------
+@st.cache_resource(show_spinner=False)
+def load_multilingual_encoder():
+    if SentenceTransformer is None:
+        logger.warning("sentence-transformers not installed; multilingual encoder disabled.")
+        return None
+    try:
+        encoder = SentenceTransformer("distiluse-base-multilingual-cased-v2")
+        return encoder
+    except Exception as e:
+        logger.warning(f"Multilingual encoder unavailable: {e}")
+        return None
+
+
+def multilingual_similarity(text1: str, text2: str, encoder) -> float | None:
+    """Compute cosine similarity between two texts using a multilingual encoder."""
+    if encoder is None or st_util is None:
+        return None
+    t1, t2 = (text1 or "").strip(), (text2 or "").strip()
+    if not t1 or not t2:
+        return None
+
+    try:
+        embeddings = encoder.encode([t1, t2])
+        sim = float(st_util.cos_sim(embeddings[0], embeddings[1]))
+        return sim
+    except Exception as e:
+        logger.warning(f"Failed to compute multilingual similarity: {e}")
+        return None
+
+# -----------------------------------------------------------------------------
 # Safe utilities
 # -----------------------------------------------------------------------------
 def _normalize_result(y) -> int:
@@ -478,6 +523,15 @@ def _proba_positive(p):
         pass
     return None
 
+
+def _language_confidence_df(label: str, detections: List[Tuple[str, float]]):
+    if not detections:
+        return pd.DataFrame({"Language": ["unknown"], "Confidence": [0.0]})
+    return pd.DataFrame({
+        "Language": [d[0] for d in detections],
+        f"Confidence ({label})": [f"{d[1]*100:.1f}%" for d in detections],
+    })
+
 # -----------------------------------------------------------------------------
 # Session defaults BEFORE widgets (prevents Streamlit key mutation errors)
 # -----------------------------------------------------------------------------
@@ -485,6 +539,16 @@ if "q1" not in st.session_state:
     st.session_state.q1 = "How can I learn Python programming?"
 if "q2" not in st.session_state:
     st.session_state.q2 = "What is the best way to learn Python programming?"
+
+LANGUAGE_CHOICES = {
+    "Auto-detect": "auto",
+    "English": "en",
+    "Spanish": "es",
+    "French": "fr",
+    "German": "de",
+    "Hindi": "hi",
+    "Portuguese": "pt",
+}
 
 # -----------------------------------------------------------------------------
 # Sidebar
@@ -754,6 +818,31 @@ with tabs[1]:
         q1 = st.text_area("Question 1", key="q1", height=100, placeholder="e.g., How do I lose weight fast?")
         q2 = st.text_area("Question 2", key="q2", height=100, placeholder="e.g., What are the best ways to reduce weight quickly?")
 
+        lang_col1, lang_col2 = st.columns(2)
+        lang_mode = lang_col1.radio("Language handling", ["Auto-detect", "Manual override"], horizontal=True)
+        manual_lang_q1 = lang_col2.selectbox("Question 1 language", list(LANGUAGE_CHOICES.keys()), index=0)
+        manual_lang_q2 = lang_col2.selectbox("Question 2 language", list(LANGUAGE_CHOICES.keys()), index=0, key="manual_q2")
+
+        handling_strategy = st.radio(
+            "Non-English handling",
+            ["Use multilingual encoder", "Translate to English then run model"],
+            help="Choose how to handle non-English text. Multilingual encoder keeps text intact; translation runs the classic model on English."
+        )
+
+        q1_detections = detect_language_confidence(q1)
+        q2_detections = detect_language_confidence(q2)
+        auto_lang_q1 = primary_language(q1)
+        auto_lang_q2 = primary_language(q2)
+
+        with st.expander("Language detection & confidence", expanded=True):
+            c_lang1, c_lang2 = st.columns(2)
+            c_lang1.dataframe(_language_confidence_df("Q1", q1_detections), use_container_width=True, hide_index=True)
+            c_lang2.dataframe(_language_confidence_df("Q2", q2_detections), use_container_width=True, hide_index=True)
+
+        lang_code_q1 = LANGUAGE_CHOICES[manual_lang_q1] if lang_mode == "Manual override" else (auto_lang_q1 or "auto")
+        lang_code_q2 = LANGUAGE_CHOICES[manual_lang_q2] if lang_mode == "Manual override" else (auto_lang_q2 or "auto")
+        non_english_present = any(code not in {"en", "auto"} for code in [lang_code_q1, lang_code_q2])
+
         run = st.button("🔎 Find", use_container_width=True)
 
         if run:
@@ -763,8 +852,16 @@ with tabs[1]:
 
             start = time.perf_counter()
             with st.spinner("Analyzing…"):
-                feats = HELPER.get_basic_features(q1, q2)
-                query = HELPER.query_point_creator(q1, q2)
+                effective_q1, effective_q2 = q1, q2
+
+                translation_used = False
+                if handling_strategy.startswith("Translate") and non_english_present:
+                    effective_q1, t1 = translate_to_english(q1, lang_code_q1 if lang_code_q1 != "auto" else None)
+                    effective_q2, t2 = translate_to_english(q2, lang_code_q2 if lang_code_q2 != "auto" else None)
+                    translation_used = t1 or t2
+
+                feats = HELPER.get_basic_features(effective_q1, effective_q2)
+                query = HELPER.query_point_creator(effective_q1, effective_q2)
 
                 try:
                     raw_pred = model.predict(query)
@@ -785,6 +882,15 @@ with tabs[1]:
                     conf_soft = max(0.0, min(1.0, 0.65 * feats["jaccard"] + 0.35 * feats["word_share"]))
                     prob = float(conf_soft)
 
+                encoder_prob = None
+                if handling_strategy.startswith("Use multilingual"):
+                    encoder = load_multilingual_encoder()
+                    sim = multilingual_similarity(q1, q2, encoder)
+                    if sim is not None:
+                        encoder_prob = (sim + 1) / 2  # cosine similarity [-1,1] → [0,1]
+                        prob = 0.5 * prob + 0.5 * encoder_prob
+                        result = 1 if prob >= 0.5 else 0
+
                 latency_ms = (time.perf_counter() - start) * 1000.0
 
             # Result banner
@@ -800,13 +906,29 @@ with tabs[1]:
             cB.metric("Decision", "Duplicate 🧩" if result == 1 else "Not Duplicate ✂️")
             cC.metric("Latency", f"{latency_ms:.1f} ms")
 
+            st.caption(
+                f"Languages used (Q1/Q2): {lang_code_q1} / {lang_code_q2}"
+            )
+            if translation_used:
+                st.info("Applied translation to English before running the classical model.")
+            if encoder_prob is not None:
+                st.info(f"Multilingual encoder similarity-derived confidence: {encoder_prob*100:.1f}%")
+            elif handling_strategy.startswith("Use multilingual"):
+                st.warning("Multilingual encoder unavailable; falling back to feature-based confidence only.")
+
             # Export
             export = {
                 "q1": q1, "q2": q2,
+                "processed_q1": effective_q1,
+                "processed_q2": effective_q2,
                 "prediction": "duplicate" if result == 1 else "not_duplicate",
                 "confidence": round(prob, 4),
+                "encoder_confidence": round(encoder_prob, 4) if encoder_prob is not None else None,
                 "features": {k: float(v) for k, v in feats.items()},
                 "latency_ms": round(latency_ms, 2),
+                "language_codes": {"q1": lang_code_q1, "q2": lang_code_q2},
+                "strategy": handling_strategy,
+                "translation_used": translation_used,
             }
             st.download_button(
                 "⬇️ Download result (.json)",

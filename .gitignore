@@ -6,6 +6,7 @@
 *.json
 !sample_submission.csv
 !feedback_log.csv
+!data/multilingual/*.csv
 
 # Models (too large for standard GitHub, use LFS or external storage if needed)
 *.pkl
